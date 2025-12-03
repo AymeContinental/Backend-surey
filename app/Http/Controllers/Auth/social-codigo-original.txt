@@ -1,0 +1,98 @@
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use App\Models\User;
+use App\Models\SocialAccount;
+use Tymon\JWTAuth\Facades\JWTAuth;
+use Laravel\Socialite\Facades\Socialite;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
+class SocialAuthController extends Controller
+{
+    /**
+     * Redirige al usuario al proveedor (Google, GitHub, Facebook).
+     */
+    public function redirect($provider)
+    {
+        if (!in_array($provider, ['google', 'github', 'facebook'])) {
+            return response()->json(['error' => 'Proveedor no soportado'], 400);
+        }
+
+        return Socialite::driver($provider)->stateless()->redirect();
+    }
+
+    /**
+     * Maneja el callback desde el proveedor y crea/inicia sesión del usuario.
+     */
+    public function callback($provider)
+    {
+        try {
+            // Obtenemos la información del usuario desde el proveedor
+            $socialUser = Socialite::driver($provider)->stateless()->user();
+
+            DB::beginTransaction();
+
+            // Verificamos si ya existe una cuenta social vinculada
+            $socialAccount = SocialAccount::where('provider', $provider)
+                ->where('provider_id', $socialUser->getId())
+                ->first();
+
+            if ($socialAccount) {
+                // Si ya existe, actualizamos el último login
+                $user = $socialAccount->user;
+                $user->last_login_at = now();
+                $user->save();
+            } else {
+                // Si no existe, buscamos por email o creamos un nuevo usuario
+                $user = User::firstOrCreate(
+                    ['email' => $socialUser->getEmail()],
+                    [
+                        'name' => $socialUser->getName() ?? $socialUser->getNickname(),
+                        'password' => Hash::make(Str::random(16)),
+                        'avatar' => $socialUser->getAvatar(),
+                        'email_verified_at' => now(),
+                        'last_login_at' => now(),
+                    ]
+                );
+
+                // Creamos el registro en social_accounts
+                SocialAccount::create([
+                    'user_id' => $user->id,
+                    'provider' => $provider,
+                    'provider_id' => $socialUser->getId(),
+                    'token' => $socialUser->token,
+                    'refresh_token' => $socialUser->refreshToken ?? null,
+                ]);
+            }
+
+            DB::commit();
+
+            // Token
+            $token = JWTAuth::fromUser($user);
+            
+            return response()->json([
+                'status' => 'success',
+                'user' => $user,
+                'token' => $token,
+            ]);
+
+
+
+            return response()->json([
+                'message' => 'Inicio de sesión exitoso',
+                'user' => $user,
+                // 'token' => $token, // Si decides implementar tokens luego
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'error' => 'Error al autenticar con ' . $provider,
+                'details' => $e->getMessage(),
+            ], 500);
+        }
+    }
+}
